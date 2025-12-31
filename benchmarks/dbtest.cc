@@ -14,7 +14,9 @@
 #include "../allocator.h"
 #include "../stats_server.h"
 #include "bench.h"
+#if !defined(NO_BDB)
 #include "bdb_wrapper.h"
+#endif
 #include "ndb_wrapper.h"
 #include "ndb_wrapper_impl.h"
 #include "kvdb_wrapper.h"
@@ -275,12 +277,15 @@ main(int argc, char **argv)
   }
 #endif
 
+#if !defined(NO_BDB)
   if (db_type == "bdb") {
     const string cmd = "rm -rf " + basedir + "/db/*";
     // XXX(stephentu): laziness
     int ret UNUSED = system(cmd.c_str());
     db = new bdb_wrapper("db", bench_type + ".db");
-  } else if (db_type == "ndb-proto1") {
+  } else
+#endif
+  if (db_type == "ndb-proto1") {
     // XXX: hacky simulation of proto1
     db = new ndb_wrapper<transaction_proto2>(
         logfiles, assignments, !nofsync, do_compress, fake_writes);

@@ -11,7 +11,7 @@ if command -v apt-get &> /dev/null; then
     
     # Install required development packages
     # libjemalloc-dev is optional as silo bundles it, but good to have.
-    sudo apt-get install -y build-essential libncurses5-dev libssl-dev libaio-dev zlib1g-dev || \
+    sudo apt-get install -y build-essential libncurses5-dev libssl-dev libaio-dev zlib1g-dev libjemalloc-dev || \
         echo "Warning: apt-get install failed. You might need to install these manually."
 else
     echo "Skipping apt-get (not on Debian/Ubuntu or missing permissions)."

@@ -14,6 +14,9 @@ USE_MALLOC_MODE ?= 1
 MYSQL ?= 1
 MYSQL_SHARE_DIR ?= /x/stephentu/mysql-5.5.29/build/sql/share
 
+# 0 = turn off BDB
+BDB ?= 0
+
 # Available modes
 #   * perf
 #   * backoff
@@ -149,16 +152,22 @@ OBJFILES := $(patsubst %.cc, $(O)/%.o, $(SRCFILES))
 MASSTREE_OBJFILES := $(patsubst masstree/%.cc, $(O)/%.o, $(MASSTREE_SRCFILES))
 
 BENCH_CXXFLAGS := $(CXXFLAGS)
-BENCH_LDFLAGS := $(LDFLAGS) -ldb_cxx -lz -lrt -lcrypt -laio -ldl -lssl -lcrypto
+BENCH_LDFLAGS := $(LDFLAGS) -lz -lrt -lcrypt -laio -ldl -lssl -lcrypto
 
-BENCH_SRCFILES = benchmarks/bdb_wrapper.cc \
-	benchmarks/bench.cc \
+BENCH_SRCFILES =  benchmarks/bench.cc \
 	benchmarks/encstress.cc \
 	benchmarks/bid.cc \
 	benchmarks/masstree/kvrandom.cc \
 	benchmarks/queue.cc \
 	benchmarks/tpcc.cc \
 	benchmarks/ycsb.cc
+
+ifeq ($(BDB),1)
+BENCH_LDFLAGS += -ldb_cxx
+BENCH_SRCFILES += benchmarks/bdb_wrapper.cc
+else
+BENCH_CXXFLAGS += -DNO_BDB
+endif
 
 ifeq ($(MYSQL_S),1)
 BENCH_CXXFLAGS += -DMYSQL_SHARE_DIR=\"$(MYSQL_SHARE_DIR)\"
