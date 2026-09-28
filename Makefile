@@ -1,5 +1,12 @@
 -include config.mk
 
+# Default to clang-18 so the binary matches the LLVM AccessShape scan.
+# Override with `make CXX=g++` if needed. Exported so masstree's configure
+# sees the same compiler.
+CC ?= clang-18
+CXX ?= clang++-18
+export CC CXX
+
 ### Options ###
 
 DEBUG ?= 0
