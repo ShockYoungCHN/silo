@@ -84,6 +84,7 @@ main(int argc, char **argv)
       {"verbose"                    , no_argument       , &verbose                   , 1}   ,
       {"parallel-loading"           , no_argument       , &enable_parallel_loading   , 1}   ,
       {"pin-cpus"                   , no_argument       , &pin_cpus                  , 1}   ,
+      {"pin-cores"                  , required_argument , 0                          , 'P'} ,
       {"slow-exit"                  , no_argument       , &slow_exit                 , 1}   ,
       {"retry-aborted-transactions" , no_argument       , &retry_aborted_transaction , 1}   ,
       {"backoff-aborted-transactions" , no_argument     , &backoff_aborted_transaction , 1}   ,
@@ -109,7 +110,7 @@ main(int argc, char **argv)
       {0, 0, 0, 0}
     };
     int option_index = 0;
-    int c = getopt_long(argc, argv, "b:s:t:d:B:f:r:n:o:m:l:a:x:", long_options, &option_index);
+    int c = getopt_long(argc, argv, "b:s:t:d:B:f:r:n:o:m:l:a:x:P:", long_options, &option_index);
     if (c == -1)
       break;
 
@@ -183,6 +184,11 @@ main(int argc, char **argv)
           ParseCSVString<unsigned, RangeAwareParser<unsigned>>(optarg));
       break;
 
+    case 'P':
+      pin_core_list = ParseCSVString<unsigned, RangeAwareParser<unsigned>>(optarg);
+      ALWAYS_ASSERT(!pin_core_list.empty());
+      break;
+
     case 'x':
       stats_server_sockfile = optarg;
       break;
@@ -194,6 +200,12 @@ main(int argc, char **argv)
     default:
       abort();
     }
+  }
+
+  if (!pin_core_list.empty() && pin_core_list.size() < nthreads) {
+    cerr << "[ERROR] --pin-cores has " << pin_core_list.size()
+         << " cpus but --num-threads is " << nthreads << endl;
+    return 1;
   }
 
   if (bench_type == "ycsb")
@@ -337,6 +349,10 @@ main(int argc, char **argv)
     cerr << "settings:"                                     << endl;
     cerr << "  par-loading : " << enable_parallel_loading   << endl;
     cerr << "  pin-cpus    : " << pin_cpus                  << endl;
+    cerr << "  pin-cores   :";
+    for (unsigned cpu : pin_core_list)
+      cerr << " " << cpu;
+    cerr                                                      << endl;
     cerr << "  slow-exit   : " << slow_exit                 << endl;
     cerr << "  retry-txns  : " << retry_aborted_transaction << endl;
     cerr << "  backoff-txns: " << backoff_aborted_transaction << endl;

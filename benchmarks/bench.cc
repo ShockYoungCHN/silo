@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -45,6 +47,7 @@ uint64_t ops_per_worker = 0;
 int run_mode = RUNMODE_TIME;
 int enable_parallel_loading = false;
 int pin_cpus = 0;
+std::vector<unsigned> pin_core_list;
 int slow_exit = 0;
 int retry_aborted_transaction = 0;
 int no_reset_counters = 0;
@@ -110,6 +113,26 @@ write_cb(void *p, const char *s)
 
 static event_avg_counter evt_avg_abort_spins("avg_abort_spins");
 
+// --pin-cores only sets affinity. It does not enable --pin-cpus,
+// so allocation stays on malloc.
+static void
+pin_worker_core(unsigned int worker_id)
+{
+  if (pin_core_list.empty())
+    return;
+  ALWAYS_ASSERT(worker_id < pin_core_list.size());
+  const int cpu = static_cast<int>(pin_core_list[worker_id]);
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  CPU_SET(cpu, &set);
+  if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+    perror("sched_setaffinity");
+    cerr << "worker " << worker_id << " failed to pin to cpu " << cpu << endl;
+    ALWAYS_ASSERT(false);
+  }
+  cerr << "worker " << worker_id << " pinned to cpu " << cpu << endl;
+}
+
 void
 bench_worker::run()
 {
@@ -121,6 +144,7 @@ bench_worker::run()
     scoped_rcu_region r; // register this thread in rcu region
   }
   on_run_setup();
+  pin_worker_core(worker_id);
   scoped_db_thread_ctx ctx(db, false);
   const workload_desc_vec workload = get_workload();
   txn_counts.resize(workload.size());
