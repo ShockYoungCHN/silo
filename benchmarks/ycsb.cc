@@ -4,6 +4,9 @@
 #include <utility>
 #include <string>
 #include <set>
+#include <map>
+#include <cstring>
+#include <ctime>
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -30,16 +33,44 @@ static const size_t YCSBRecordSize = 100;
 // the default is a modification of YCSB "A" we made (80/20 R/W)
 static unsigned g_txn_workload_mix[] = { 80, 20, 0, 0 };
 
+// Dedicated workers used by the 1-read + N-scan runs.
+// scan_workers == 0 keeps the workload-mix path.
+static unsigned g_scan_workers = 0;
+static uint64_t g_read_keys = 0;
+static uint64_t g_scan_key_start = 0;
+static size_t g_scan_length = 100;
+static uint64_t g_latency_sample_every = 1024;
+
+static uint64_t
+mono_ns()
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+}
+
+static uint64_t
+hist_upper_ns(uint64_t ns)
+{
+  return ((ns + 99) / 100) * 100;
+}
+
 class ycsb_worker : public bench_worker {
 public:
   ycsb_worker(unsigned int worker_id,
               unsigned long seed, abstract_db *db,
               const map<string, abstract_ordered_index *> &open_tables,
-              spin_barrier *barrier_a, spin_barrier *barrier_b)
+              spin_barrier *barrier_a, spin_barrier *barrier_b,
+              const char *role = nullptr,
+              unsigned ordinal = 0)
     : bench_worker(worker_id, true, seed, db,
                    open_tables, barrier_a, barrier_b),
       tbl(open_tables.at("USERTABLE")),
-      computation_n(0)
+      computation_n(0),
+      role(role),
+      ordinal(ordinal),
+      attempts(0),
+      commits(0)
   {
     obj_key0.reserve(str_arena::MinStrReserveLength);
     obj_key1.reserve(str_arena::MinStrReserveLength);
@@ -49,15 +80,24 @@ public:
   txn_result
   txn_read()
   {
+    const bool timed = role != nullptr;
+    if (timed)
+      ++attempts;
+    const uint64_t t0 = timed ? mono_ns() : 0;
     void * const txn = db->new_txn(txn_flags, arena, txn_buf(), abstract_db::HINT_KV_GET_PUT);
     scoped_str_arena s_arena(arena);
     try {
-      const uint64_t k = r.next() % nkeys;
+      const uint64_t space = g_read_keys ? g_read_keys : nkeys;
+      ALWAYS_ASSERT(space > 0 && space <= nkeys);
+      const uint64_t k = r.next() % space;
       ALWAYS_ASSERT(tbl->get(txn, u64_varkey(k).str(obj_key0), obj_v));
       computation_n += obj_v.size();
       measure_txn_counters(txn, "txn_read");
-      if (likely(db->commit_txn(txn)))
+      if (likely(db->commit_txn(txn))) {
+        if (timed)
+          note_ok(mono_ns() - t0);
         return txn_result(true, 0);
+      }
     } catch (abstract_db::abstract_abort_exception &ex) {
       db->abort_txn(txn);
     }
@@ -132,18 +172,28 @@ public:
   txn_result
   txn_scan()
   {
+    const bool timed = role != nullptr;
+    if (timed)
+      ++attempts;
+    const uint64_t t0 = timed ? mono_ns() : 0;
     void * const txn = db->new_txn(txn_flags, arena, txn_buf(), abstract_db::HINT_KV_SCAN);
     scoped_str_arena s_arena(arena);
-    const size_t kstart = r.next() % nkeys;
+    // Scans may be confined to [g_scan_key_start, nkeys) so that they land on
+    // different pages than the point queries, which only touch [0, read_keys).
+    const uint64_t scan_span = nkeys - g_scan_key_start;
+    const size_t kstart = g_scan_key_start + r.next() % scan_span;
     const string &kbegin = u64_varkey(kstart).str(obj_key0);
-    const string &kend = u64_varkey(kstart + 100).str(obj_key1);
+    const string &kend = u64_varkey(kstart + g_scan_length).str(obj_key1);
     worker_scan_callback c;
     try {
       tbl->scan(txn, kbegin, &kend, c);
       computation_n += c.n;
       measure_txn_counters(txn, "txn_scan");
-      if (likely(db->commit_txn(txn)))
+      if (likely(db->commit_txn(txn))) {
+        if (timed)
+          note_ok(mono_ns() - t0);
         return txn_result(true, 0);
+      }
     } catch (abstract_db::abstract_abort_exception &ex) {
       db->abort_txn(txn);
     }
@@ -156,9 +206,38 @@ public:
     return static_cast<ycsb_worker *>(w)->txn_scan();
   }
 
+  virtual void
+  dump_role_metrics() const
+  {
+    if (!role)
+      return;
+    cerr << "SILO_METRIC worker=" << ordinal
+         << " role=" << role
+         << " commits=" << commits
+         << " attempts=" << attempts << endl;
+    for (map<uint64_t, uint64_t>::const_iterator it = hist.begin();
+         it != hist.end(); ++it) {
+      cerr << "SILO_HIST worker=" << ordinal
+           << " role=" << role
+           << " upper_ns=" << it->first
+           << " count=" << it->second << endl;
+    }
+  }
+
   virtual workload_desc_vec
   get_workload() const
   {
+    if (role) {
+      workload_desc_vec w;
+      if (!strcmp(role, "read"))
+        w.push_back(workload_desc("Read", 1.0, TxnRead));
+      else if (!strcmp(role, "scan"))
+        w.push_back(workload_desc("Scan", 1.0, TxnScan));
+      else
+        ALWAYS_ASSERT(false);
+      return w;
+    }
+
     //w.push_back(workload_desc("Read", 0.95, TxnRead));
     //w.push_back(workload_desc("ReadModifyWrite", 0.04, TxnRmw));
     //w.push_back(workload_desc("Write", 0.01, TxnWrite));
@@ -210,11 +289,25 @@ protected:
 private:
   abstract_ordered_index *tbl;
 
+  void
+  note_ok(uint64_t ns)
+  {
+    ++commits;
+    if (g_latency_sample_every &&
+        (commits % g_latency_sample_every) == 1)
+      hist[hist_upper_ns(ns)]++;
+  }
+
   string obj_key0;
   string obj_key1;
   string obj_v;
 
   uint64_t computation_n;
+  const char *role;
+  unsigned ordinal;
+  uint64_t attempts;
+  uint64_t commits;
+  map<uint64_t, uint64_t> hist;
 };
 
 static void
@@ -410,11 +503,17 @@ protected:
     ALWAYS_ASSERT((blockstart % alignment) == 0);
     fast_random r(8544290);
     vector<bench_worker *> ret;
-    for (size_t i = 0; i < nthreads; i++)
+    if (g_scan_workers)
+      ALWAYS_ASSERT(nthreads == size_t(g_scan_workers) + 1);
+    for (size_t i = 0; i < nthreads; i++) {
+      const char *role = nullptr;
+      if (g_scan_workers)
+        role = (i == 0) ? "read" : "scan";
       ret.push_back(
         new ycsb_worker(
           blockstart + i, r.next(), db, open_tables,
-          &barrier_a, &barrier_b));
+          &barrier_a, &barrier_b, role, unsigned(i)));
+    }
     return ret;
   }
 
@@ -470,10 +569,15 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
   while (1) {
     static struct option long_options[] = {
       {"workload-mix" , required_argument , 0 , 'w'},
+      {"scan-workers" , required_argument , 0 , 's'},
+      {"read-keys" , required_argument , 0 , 'r'},
+      {"scan-length" , required_argument , 0 , 'n'},
+      {"scan-key-start" , required_argument , 0 , 'k'},
+      {"latency-sample-every" , required_argument , 0 , 'e'},
       {0, 0, 0, 0}
     };
     int option_index = 0;
-    int c = getopt_long(argc, argv, "w:", long_options, &option_index);
+    int c = getopt_long(argc, argv, "w:s:r:n:k:e:", long_options, &option_index);
     if (c == -1)
       break;
     switch (c) {
@@ -498,6 +602,29 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
       }
       break;
 
+    case 's':
+      g_scan_workers = strtoul(optarg, nullptr, 10);
+      break;
+
+    case 'r':
+      g_read_keys = strtoull(optarg, nullptr, 10);
+      break;
+
+    case 'n':
+      g_scan_length = strtoul(optarg, nullptr, 10);
+      ALWAYS_ASSERT(g_scan_length > 0);
+      break;
+
+    case 'k':
+      g_scan_key_start = strtoull(optarg, nullptr, 10);
+      ALWAYS_ASSERT(g_scan_key_start + g_scan_length < nkeys);
+      break;
+
+    case 'e':
+      g_latency_sample_every = strtoull(optarg, nullptr, 10);
+      ALWAYS_ASSERT(g_latency_sample_every > 0);
+      break;
+
     case '?':
       /* getopt_long already printed an error message. */
       exit(1);
@@ -508,6 +635,12 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
   }
 
   if (verbose) {
+    cerr << "  scan_workers=" << g_scan_workers
+         << " read_keys=" << g_read_keys
+         << " scan_length=" << g_scan_length
+         << " scan_key_start=" << g_scan_key_start
+         << " latency_sample_every=" << g_latency_sample_every
+         << endl;
     cerr << "ycsb settings:" << endl;
     cerr << "  workload_mix: "
          << format_list(g_txn_workload_mix, g_txn_workload_mix + ARRAY_NELEMS(g_txn_workload_mix))
