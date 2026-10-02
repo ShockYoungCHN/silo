@@ -115,22 +115,27 @@ static event_avg_counter evt_avg_abort_spins("avg_abort_spins");
 
 // --pin-cores only sets affinity. It does not enable --pin-cpus,
 // so allocation stays on malloc.
+//
+// worker_id is a global core id: allocate_contiguous_aligned_block hands out
+// blockstart + i with blockstart a multiple of num_cpus_online, so the index
+// within the block is what matches the --pin-cores list.
 static void
 pin_worker_core(unsigned int worker_id)
 {
   if (pin_core_list.empty())
     return;
-  ALWAYS_ASSERT(worker_id < pin_core_list.size());
-  const int cpu = static_cast<int>(pin_core_list[worker_id]);
+  const unsigned int idx = worker_id % coreid::num_cpus_online();
+  ALWAYS_ASSERT(idx < pin_core_list.size());
+  const int cpu = static_cast<int>(pin_core_list[idx]);
   cpu_set_t set;
   CPU_ZERO(&set);
   CPU_SET(cpu, &set);
   if (sched_setaffinity(0, sizeof(set), &set) != 0) {
     perror("sched_setaffinity");
-    cerr << "worker " << worker_id << " failed to pin to cpu " << cpu << endl;
+    cerr << "worker " << idx << " failed to pin to cpu " << cpu << endl;
     ALWAYS_ASSERT(false);
   }
-  cerr << "worker " << worker_id << " pinned to cpu " << cpu << endl;
+  cerr << "worker " << idx << " pinned to cpu " << cpu << endl;
 }
 
 void
@@ -263,6 +268,7 @@ bench_runner::run()
     (*it)->start();
 
   barrier_a.wait_for(); // wait for all threads to start up
+  cerr << "SILO_ATTACH_READY" << endl;
   timer t, t_nosync;
   barrier_b.count_down(); // bombs away!
   if (run_mode == RUNMODE_TIME) {
@@ -399,6 +405,9 @@ bench_runner::run()
        << avg_persist_latency_ms << " "
        << agg_abort_rate << endl;
   cout.flush();
+
+  for (size_t i = 0; i < workers.size(); i++)
+    workers[i]->dump_role_metrics();
 
   if (!slow_exit)
     return;

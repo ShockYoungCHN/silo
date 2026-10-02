@@ -145,6 +145,7 @@ public:
   virtual workload_desc_vec get_workload() const = 0;
 
   virtual void run();
+  virtual void dump_role_metrics() const {}
 
   inline size_t get_ntxn_commits() const { return ntxn_commits; }
   inline size_t get_ntxn_aborts() const { return ntxn_aborts; }
